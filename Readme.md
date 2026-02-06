@@ -41,7 +41,7 @@ The diagram below shows the complete **end-to-end RAG workflow**, clearly separa
 * **Bottom loop:** Context-aware LLaMA generation
 
 <p align="center">
-  <img src="path/to/your/diagram.png" alt="PDF Talker Architecture Diagram" width="90%">
+  <img src="pdftalker_flowdiagram.png" alt="PDF Talker Architecture Diagram" width="90%">
 </p>
 
 
