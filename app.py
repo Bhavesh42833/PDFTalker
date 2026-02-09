@@ -4,6 +4,7 @@ import shutil
 import pdfplumber
 import cassio
 import tempfile
+import uuid
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -32,7 +33,8 @@ st.set_page_config(
 
 
 
-def create_vector_store(file_upload):
+@st.cache_resource(show_spinner="Creating vector store...")
+def create_vector_store(file_upload,id):
     temp_dir=tempfile.mkdtemp()
     temp_file_path=os.path.join(temp_dir, file_upload.name)
 
@@ -40,6 +42,10 @@ def create_vector_store(file_upload):
         f.write(file_upload.getvalue())
         loader=PyPDFLoader(temp_file_path)
         documents=loader.load()
+
+    for doc in documents:
+        doc.metadata["source"] = file_upload.name
+        doc.metadata["id"]=id
     
     text_splitter=RecursiveCharacterTextSplitter(
         chunk_size=1000,
@@ -56,7 +62,7 @@ def create_vector_store(file_upload):
     shutil.rmtree(temp_dir)
     return astra_db
 
-def process_query(question,vector_store):
+def process_query(question,vector_store,id):
     llm=ChatGroq(model="llama-3.3-70b-versatile",temperature=0)
     query_prompt=PromptTemplate(
     input_variables=["question"],
@@ -68,7 +74,7 @@ def process_query(question,vector_store):
     )
 
     retriever_from_llm=MultiQueryRetriever.from_llm(
-    retriever=vector_store.as_retriever(),
+    retriever=vector_store.as_retriever(search_kwargs={"filter":{"id":id}}),
     llm=llm,
     prompt=query_prompt,
     parser_key="lines",
@@ -78,7 +84,7 @@ def process_query(question,vector_store):
         """ Answer the question based on the following context:
             Think step by step in detail before giving the final answer.
             I will give you 5 star if you answer correctly.
-            If question is not related to context, do your best to answer it.
+            If question is not related to context, always mention not in context and generate a correct answer accordingly.
             <context>
             {context}
             </context>                                        
@@ -97,7 +103,7 @@ def process_query(question,vector_store):
     response=retrieval_chain.invoke({"input":question})
     return response["answer"]
 
-@st.cache_data
+@st.cache_data(show_spinner="Processing PDF...")
 def extract_all_pages_as_images(file_upload):
     images=[]
     with pdfplumber.open(file_upload) as pdf:
@@ -106,20 +112,22 @@ def extract_all_pages_as_images(file_upload):
             images.append(pil_image)
     return images
 
-def reset_collection(vector_store):
-    if vector_store is not None:
-        try:
-            vector_store.delete_collection()
-        except:
+def reset_collection(vector_store,id):
+ if vector_store is not None:
+        with st.spinner("Resetting collection..."):
+         try:
+            print(f"Deleting collection for id:{id}")
+            vector_store.delete_by_metadata_filter(filter={"id":id})
+         except Exception as e:
+            print(e)
             pass
         st.session_state["vector_store"] = None
         st.session_state["pdf_pages"] = []
         st.session_state["messages"] = []
         st.session_state["file_upload"] = None
         st.session_state["uploader_key"] += 1
-        st.success("Collection reset successfully!")
         st.rerun()
-    else:
+ else:
         st.error("No collection to delete.")
 
 @st.fragment
@@ -150,7 +158,7 @@ def chat_interface():
                         if st.session_state["vector_store"] is None:
                             st.error("Please upload a PDF first.")
                         else:
-                            response=process_query(prompt,st.session_state["vector_store"])
+                            response=process_query(prompt,st.session_state["vector_store"],st.session_state["id"])
                             st.markdown(response)
                 
                 if st.session_state["vector_store"] is not None:
@@ -184,6 +192,8 @@ def main():
         st.session_state["pdf_pages"] = []
     if "file_upload" not in st.session_state:
         st.session_state["file_upload"] = None
+    if "id" not in st.session_state:
+        st.session_state["id"] = str(uuid.uuid4())
 
 
     file_upload=st. file_uploader(
@@ -195,15 +205,24 @@ def main():
     col1,col2=st.columns([1.5,2])
 
     if file_upload is None and st.session_state["file_upload"] is not None:
-        reset_collection(st.session_state["vector_store"])
+        reset_collection(st.session_state["vector_store"],st.session_state["id"])
+    
+    
+    if st.button("Delete Collection"):
+        if st.session_state["vector_store"] is None:
+            st.error("No collection to delete.")
+            return
+        else:
+           reset_collection(st.session_state["vector_store"],st.session_state["id"])
 
     if file_upload :
         st.session_state["file_upload"]=file_upload
-        if st.session_state["vector_store"] is None:
-            st.session_state["vector_store"]=create_vector_store(file_upload)
         if st.session_state["pdf_pages"] ==[]:
             pdf_pages=extract_all_pages_as_images(file_upload)
             st.session_state["pdf_pages"]=pdf_pages
+        if st.session_state["vector_store"] is None:
+            st.session_state["vector_store"]=create_vector_store(file_upload,st.session_state["id"])
+      
 
         zoom_factor=col1.slider("Zoom factor", min_value=100, max_value=1000, value=700, step=100)
 
@@ -212,18 +231,13 @@ def main():
                 for page_image in st.session_state["pdf_pages"]:
                     st.image(page_image,width=zoom_factor)
     
-    delete_collection=col1.button("🗑 Delete Collection")
 
-    if delete_collection:
-        if st.session_state["vector_store"] is None:
-            st.error("No collection to delete.")
-            return
-        else:
-           reset_collection(st.session_state["vector_store"])
 
     if file_upload:
       with col2:
          chat_interface()
+
+
                     
 if __name__=="__main__":
     main()
